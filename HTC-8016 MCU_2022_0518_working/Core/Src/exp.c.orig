@@ -1,0 +1,259 @@
+#include "exp.h"
+#include "operation.h"
+#include "CANSPI.h"
+#include "uart.h"
+#include "adc.h"
+
+WORD ERR_NO = NO_ERR;
+
+WORD Pre_Ref[5][13] =           {{750, 700, 700, 700, 750, 780, 800, 800, 800, 800, 800, 800, 800}, 
+                                {650, 700, 670, 670, 720, 730, 780, 780, 800, 800, 780, 780, 750}, 
+                                {680, 700, 700, 700, 700, 700, 700, 750, 750, 750, 750 ,750, 700}, 
+                                {500, 650, 700, 600, 700, 700, 700, 750, 750, 750, 750, 750, 750}, 
+                                {50, 600, 680, 680, 700, 650, 700, 700, 700, 700, 750, 750, 750}};
+
+WORD PPS_Off_Ref[5][13] =       {{100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100}, 
+                                {100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100}, 
+                                {100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100}, 
+                                {100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100}, 
+                                {100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100}};                        
+
+void XRAY_RESET(void)
+{
+	T_100ms_Err_chk = 10;
+	T_1ms_STB_Err_chk = 0;
+	Hand_Switch_Status = sw_STB;
+	PpsXrayStatus = _OFF;
+
+       ErrorFlag.kV_Over = OFF;
+       ErrorFlag.kV_Under = OFF;
+       ErrorFlag.mA_Over = OFF;
+       ErrorFlag.mA_Under = OFF;
+	ErrorFlag.Tank_Temp_Over = OFF;
+	ErrorFlag.Heatsink_Temp_Over = OFF;
+	
+	BuzzerState = _OFF;
+	FIL_OFF;
+	READY_DTC_OFF;
+	EXP_DTC_OFF;
+	PPS_MODE_OFF;
+	HAL_DAC_SetValue(&hdac, DAC_CHANNEL_1, DAC_ALIGN_12B_R, 0);  
+	HAL_DAC_SetValue(&hdac, DAC_CHANNEL_2, DAC_ALIGN_12B_R, 0); 
+	
+	FILAMENT_LED_OFF;
+	EXPOSURE_LED_OFF;
+}
+void EXP_Rating_Set(void)
+{
+	int16_t	Cal_kV = 0, Cal_mA = 0, Cal_Preh = 0, Cal_pron = 0, Cal_prof = 0;
+	uint8_t kV_Index = 0, mA_Index = 0;
+        
+        if((g_xray.kV == 0) || (g_xray.mA == 0)) return;
+
+	kV_Index = (BYTE)((g_xray.kV / 10) - 4);
+	mA_Index = (BYTE)(g_xray.mA - 4);
+	
+	if(kV_Index > 4) kV_Index = 4;
+	if(mA_Index > 12) mA_Index = 12;
+
+	Cal_kV = Load_CalData.kV_data[kV_Index] * 10;
+	Cal_mA = Load_CalData.mA_data[kV_Index][mA_Index] * 10;
+        Cal_Preh = Load_CalData.PreHeat_data[kV_Index][mA_Index] * 10; 
+        Cal_pron = Load_CalData.PPS_ON_data[kV_Index][mA_Index] * 10;
+        Cal_prof = Load_CalData.PPS_OFF_data[kV_Index][mA_Index] * 10;	
+
+	// kV Setting
+	//----------------------------------------------------------------------------------------------
+	// g_xray.kv_dac        = DAC 출력 값
+	// g_xray.kv            = kV  설정 값 
+	
+	// mA Setting
+	//----------------------------------------------------------------------------------------------
+	// g_xray.mA_dac        = DAC 출력 값
+	// g_xray.mA            = mA  설정 값 
+
+	g_xray.kv_dac = (uint16_t)(((float)g_xray.kV * CONV_1kV_To_DATA ) + Cal_kV);
+	g_xray.ma_dac = (uint16_t)((float)g_xray.mA * CONV_0_01mA_To_DATA ) + Cal_mA;
+	g_xray.pre_dac = (uint16_t)(Pre_Ref[kV_Index][mA_Index] + Cal_Preh);        
+    g_xray.pron_dac = (uint16_t)(g_xray.ma_dac + Cal_pron);
+    g_xray.prof_dac = (uint16_t)(PPS_Off_Ref[kV_Index][mA_Index] + Cal_prof);
+
+	if() g_xray.pre_dac *= 0.75;
+
+	if(g_xray.kv_dac > MAX_kV_DAC_VALUE) g_xray.kv_dac = (uint16_t)(MAX_kV_DAC_VALUE);
+	if(g_xray.kv_dac < MIN_kV_DAC_VALUE) g_xray.kv_dac = (uint16_t)(MIN_kV_DAC_VALUE);
+
+	if(g_xray.ma_dac > MAX_mA_DAC_VALUE) g_xray.ma_dac = (uint16_t)(MAX_mA_DAC_VALUE);
+	if(g_xray.ma_dac < MIN_mA_DAC_VALUE) g_xray.ma_dac = (uint16_t)(MIN_mA_DAC_VALUE);
+
+	if(g_xray.pre_dac > MAX_Pre_DAC_VALUE) g_xray.pre_dac = (uint16_t)(MAX_Pre_DAC_VALUE);
+	if(g_xray.pre_dac < MIN_Pre_DAC_VALUE) g_xray.pre_dac = (uint16_t)(MIN_Pre_DAC_VALUE);
+
+	if(g_xray.pron_dac > MAX_Pon_DAC_VALUE) g_xray.pron_dac = (uint16_t)(MAX_Pon_DAC_VALUE);
+	if(g_xray.pron_dac < MIN_Pon_DAC_VALUE) g_xray.pron_dac = (uint16_t)(MIN_Pon_DAC_VALUE);
+
+	if(g_xray.prof_dac > MAX_Poff_DAC_VALUE) g_xray.prof_dac = (uint16_t)(MAX_Poff_DAC_VALUE);
+	if(g_xray.prof_dac < MIN_Poff_DAC_VALUE) g_xray.prof_dac = (uint16_t)(MIN_Poff_DAC_VALUE);
+
+	if(g_xray.mA < 4) g_xray.ma_dac = 100;				
+}
+
+/**************************************************************************************************/
+
+void Error_Send(void)
+{
+	if ( T_100ms_Err_chk >= 10 ) 
+	{ 
+		T_100ms_Err_chk = 0; 
+	}
+	else
+	{
+		return;
+	}
+
+    
+	if ( (ERR_NO == NO_ERR) || (DipSwitch.bit.sw4_noerror == DIPSW_ON) )		return;
+
+	UART_TX_Queue_Add(ERR_NO, 0x00, 0x00);
+}
+
+/**************************************************************************************************/
+
+void EXP_PPS_Handler(void)
+{
+	if(ERR_NO != NO_ERR)	{ return; }
+	if(g_opt.exp_opt == PPS)
+	{
+		switch(Hand_Switch_Status)
+		{
+			case sw_STB:
+			{   
+				g_xray.stat = 0;
+				READY_DTC_OFF;
+				EXP_DTC_OFF;
+				FIL_OFF;
+                                FILAMENT_LED_OFF;
+                                EXPOSURE_LED_OFF;				
+				HAL_DAC_SetValue(&hdac, DAC_CHANNEL_1, DAC_ALIGN_12B_R, 0);  
+				HAL_DAC_SetValue(&hdac, DAC_CHANNEL_2, DAC_ALIGN_12B_R, 0);  
+			}
+			break;
+
+			case sw_RDY_start: 
+			{ 		
+				T_1ms_RDY_Err_chk = 0; 
+				FILAMENT_LED_ON;
+			}
+			break;
+
+			case sw_RDY_ing:
+			case sw_RDY_ON :
+			{
+				READY_DTC_ON;
+                HAL_DAC_SetValue(&hdac, DAC_CHANNEL_1, DAC_ALIGN_12B_R, g_xray.pre_dac);//Preheat DAC
+			}
+			break;
+
+			case sw_EXP_start:
+			{
+			        g_std.exp_cnt++; 
+			}   
+			break;
+
+                        case sw_EXP_Limit:
+                        {
+                                XRAY_RESET();
+#if 0                        
+				uint8_t expcnt_arr[4] = {0,0,0,0};				
+               
+				expcnt_arr[3] = (g_std.exp_cnt&0xff000000) >> 24;
+				expcnt_arr[2] = (g_std.exp_cnt&0x00ff0000) >> 16;
+				expcnt_arr[1] = (g_std.exp_cnt&0x0000ff00) >> 8;
+				expcnt_arr[0] =  g_std.exp_cnt&0x000000ff;
+				Write_Memory(MEM_P0, 0, 3, expcnt_arr);
+#endif				
+			}
+			break;
+		}
+	}
+}
+/**************************************************************************************************/
+
+void EXP_NOR_Handler(void)
+{
+	if(ERR_NO != NO_ERR)	{ return; }
+	if(g_opt.exp_opt == CONT)
+	{
+		switch(Hand_Switch_Status)
+		{
+			case sw_STB:
+			{
+				g_xray.stat = 0;
+				READY_DTC_OFF;
+				EXP_DTC_OFF;
+				FIL_OFF;
+                                FILAMENT_LED_OFF;
+                                EXPOSURE_LED_OFF;				
+				HAL_DAC_SetValue(&hdac, DAC_CHANNEL_1, DAC_ALIGN_12B_R, 0);  
+				HAL_DAC_SetValue(&hdac, DAC_CHANNEL_2, DAC_ALIGN_12B_R, 0);  
+			}
+			break;
+
+			case sw_RDY_start: 
+			{ 		
+				T_1ms_RDY_Err_chk = 0; 
+				FILAMENT_LED_ON;
+			}
+			break;
+			
+			case sw_RDY_ing:
+			case sw_RDY_ON :
+			{
+				READY_DTC_ON;
+				HAL_DAC_SetValue(&hdac, DAC_CHANNEL_1, DAC_ALIGN_12B_R, g_xray.pre_dac);//Preheat DAC
+			}   
+			break;
+
+			case sw_EXP_start:
+			{
+				g_xray.stat = 1;
+				g_std.exp_cnt++;
+				T_1ms_Exp_Err_chk = 0;				
+                                if(DipSwitch.bit.sw3_buzzeroff == DIPSW_OFF) { BuzzerState = _ON; }
+                                EXPOSURE_LED_ON;
+			}   
+			break;
+            
+			case sw_EXP_ing:
+			{				
+				FIL_ON;
+				EXP_DTC_ON;
+				HAL_DAC_SetValue(&hdac, DAC_CHANNEL_1, DAC_ALIGN_12B_R, g_xray.ma_dac);  //kV DAC
+				HAL_DAC_SetValue(&hdac, DAC_CHANNEL_2, DAC_ALIGN_12B_R, g_xray.kv_dac);  //mA DAC				
+			}   
+			break;
+
+                        case sw_EXP_Limit:
+                        {
+                                XRAY_RESET();
+#if 0                        
+				uint8_t expcnt_arr[4] = {0,0,0,0};				
+               
+				expcnt_arr[3] = (g_std.exp_cnt&0xffff000000000000) >> 24;
+				expcnt_arr[2] = (g_std.exp_cnt&0x0000ffff00000000) >> 16;
+				expcnt_arr[1] = (g_std.exp_cnt&0x00000000ffff0000) >> 8;
+				expcnt_arr[0] =  g_std.exp_cnt&0x000000000000ffff;
+				Write_Memory(MEM_P0, 0, 3, expcnt_arr);
+#endif				
+                        }
+                        break;
+		}
+	}
+}
+/**************************************************************************************************/
+
+
+
+
+
+
